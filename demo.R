@@ -21,9 +21,12 @@ library(invgamma)
 source('BICC_function.R')
 
 # read data
-data = read.csv('balanced_sim_dat.csv')
+data = read.csv('data.csv')
 
 # run function
+# Arguments
+# data = data frame of data
+# niter = number of iterations
+# nchain = number of Gibbs chains
+# nburn = number of burn-in
 BICC(data = data, niter = 50000, nchain = 2, nburn = 1000)
-
-
