@@ -109,7 +109,7 @@ BICC <- function(data, niter, nchain, nburn){
     
     # Metropolis-Hastings algorithm for selection of hyperparameters
     # create empty matrices to store draws
-    # prior distributions of sigma_s_sq: IG(a_s, b_s) sigma_r_sq and sigma_sq
+    # prior distributions of sigma_s_sq: IG(a_s, b_s) 
     # hyperparameter: a_s, b_s
     a_s <- matrix(0, nrow = niter, ncol = 1)
     b_s <- matrix(0, nrow = niter, ncol = 1)
