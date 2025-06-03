@@ -7,25 +7,29 @@
 # nburn = number of burn-in
 
 BICC <- function(data, niter, nchain, nburn){
+
+  # Shift response values by 1 if they start from 0
+  if (min(data$score) == 0) {
+    data$score <- data$score + 1
+  }
   
   #################### clmm  
   
   # convert data to run clmm 
   data$video = as.factor(data$video)
   data$rater = as.factor(data$rater)
-  data$score_ord = as.factor(data$score_ord)
-  
+  data$score = as.factor(data$score)
   
   # run clmm
-  clmm_fm1 <- clmm(score_ord ~ predictor + (1 | video) + (1 | rater), data = data, Hess = TRUE, link = "probit")
-  
-  #print(summary(clmm_fm1))
+  clmm_fm1 <- clmm(score ~ predictor + (1 | video) + (1 | rater), data = data, Hess = TRUE, link = "probit")
+  print(summary(clmm_fm1))
+  print(confint(clmm_fm1))
   
   # convert data to run gibbs
   video = as.numeric(data$video)
   rater = as.numeric(data$rater)
-  predictor = as.numeric(data$predictor)
-  score = as.numeric(data$score_ord)
+  score = as.numeric(data$score)
+  Xmat = as.matrix(Xmat)
   
   # number of categories of the responses
   K <- length(unique(score))
@@ -59,8 +63,8 @@ BICC <- function(data, niter, nchain, nburn){
   gibbs_fn <- function(niter, video, rater, predictor, score
                        , beta.inital = unname(clmm_fm1$beta)
                        , delta.inital = unname(clmm_fm1$alpha)
-                       , sigma_s_sq.init = unname((clmm_fm1$optRes$par[5])^2)
-                       , sigma_r_sq.init = unname((clmm_fm1$optRes$par[6])^2)
+                       , sigma_s_sq.init = unname((clmm_fm1$optRes$par[K+1])^2)
+                       , sigma_r_sq.init = unname((clmm_fm1$optRes$par[K+2])^2)
   ) 
   {
     
@@ -73,11 +77,11 @@ BICC <- function(data, niter, nchain, nburn){
     # hyperparameter of prior distribution of beta
     mu0 <- 0
     Sigma0 <- 1
-    
     beta <- beta.inital
     
     # set sigma_sq = 1
     sigma_sq <- 1
+    Sigma1 <- solve(solve(Sigma0) + (1/sigma_sq)*t(predictor)%*%predictor)   # Posterior covariance for beta (same for all iterations)
     
     # sigma_s_sq
     sigma_s_sq <- sigma_s_sq.init
@@ -95,17 +99,15 @@ BICC <- function(data, niter, nchain, nburn){
     delta <- rep(0, K+1)
     delta[1] <- -Inf
     delta[K+1] <- Inf
-    rand <- rnorm(K-1, mean = unname(quantile(sapply(1:Nobs, function(i) beta*predictor[i] + video_gibbs[video[i]] + rater_gibbs[rater[i]]), probs = c(0.25,0.50,0.75))), sd = 0.5)
-    delta[2:K] <- rand[order(rand)] 
+    delta[2:K] <- delta.inital
     
     # create empty matrices to store draws
     beta_sample <- matrix(0, nrow = niter, ncol = 1)
     delta_sample <- matrix(0, nrow = niter, ncol = max(score)-1)
-    video_sample <- matrix(0, nrow = niter, ncol = Nvideo)
-    rater_sample <- matrix(0, nrow = niter, ncol = Nrater)
     sigma_s_sq_sample <- matrix(0, nrow = niter, ncol = 1)
     sigma_r_sq_sample <- matrix(0, nrow = niter, ncol = 1)
-    rho_sample <- matrix(0, nrow = niter, ncol = 1)
+    rho_agree_sample <- matrix(0, nrow = niter, ncol = 1)
+    rho_con_sample <- matrix(0, nrow = niter, ncol = 1)
     
     # Metropolis-Hastings algorithm for selection of hyperparameters
     # create empty matrices to store draws
@@ -131,8 +133,6 @@ BICC <- function(data, niter, nchain, nburn){
       # store draws
       beta_sample[iter, ] <- beta
       delta_sample[iter, ] <- delta[2:K]
-      video_sample[iter, ] <- video_gibbs
-      rater_sample[iter, ] <- rater_gibbs
       sigma_s_sq_sample[iter, ] <- sigma_s_sq
       sigma_r_sq_sample[iter, ] <- sigma_r_sq
       
@@ -141,15 +141,15 @@ BICC <- function(data, niter, nchain, nburn){
       upper_b <- delta[score+1]
       
       # sample latent y from the truncated normal distribution
+      Xbeta <- beta*predictor
       y_g <- sapply(1:Nobs,
                     function(i) truncnorm::rtruncnorm(n = 1,
-                                                      mean = beta*predictor[i] + video_gibbs[video[i]] + rater_gibbs[rater[i]],
+                                                      mean = Xbeta[i] + video_gibbs[video[i]] + rater_gibbs[rater[i]],
                                                       sd = sqrt(sigma_sq),
                                                       a = lower_b[i],
                                                       b = upper_b[i]))  
       
       # beta draw
-      Sigma1 <- solve(solve(Sigma0) + (1/sigma_sq)*t(predictor)%*%predictor)
       y_g_prime <- sapply(1:Nobs,
                           function(i)  y_g[i] - video_gibbs[video[i]] - rater_gibbs[rater[i]])
       mu1 <- Sigma1%*%(solve(Sigma0)%*%(mu0) + (1/sigma_sq)*t(predictor)%*%y_g_prime)
@@ -158,7 +158,7 @@ BICC <- function(data, niter, nchain, nburn){
       # cutoff points draw
       for (i in 2:K) {
         delta[i] <- runif(1, min = max(max(y_g[score==i-1]), delta[i-1], delta[1]), 
-                          max = min(min(y_g[score==i]), delta[K+1])) 
+                          max = min(min(y_g[score==i]), delta[i+1], delta[K+1])) 
       }
       
       # video effect draw
@@ -236,11 +236,17 @@ BICC <- function(data, niter, nchain, nburn){
       new_b_r <- b_r[iter,] + (0.5*(sum(rater_gibbs^2)))
       sigma_r_sq <- rinvgamma(1, shape = new_a_r, rate = new_b_r)
       
-      # calculate rho
-      rho_g <- sigma_s_sq/(sigma_sq+sigma_s_sq+sigma_r_sq)
+      # calculate rho absolute agreement
+      rho_agree <- sigma_s_sq/(sigma_sq+sigma_s_sq+sigma_r_sq)
       
-      # store draws
-      rho_sample[iter, ] <- rho_g
+      # store draws rho absolute agreement
+      rho_agree_sample[iter, ] <- rho_agree
+      
+      # calculate rho_consistency
+      rho_con <- sigma_s_sq/(sigma_sq+sigma_s_sq)
+      
+      # store draws rho consistency
+      rho_con_sample[iter, ] <- rho_con
       
       iter <- iter + 1
       
@@ -251,13 +257,12 @@ BICC <- function(data, niter, nchain, nburn){
       
     }
     
-    out <- list(beta = beta_sample[,1],
-                sigma_s_sq = sigma_s_sq_sample[,1],
-                sigma_r_sq = sigma_r_sq_sample[,1],
-                delta_1 = delta_sample[,1],
-                delta_2 = delta_sample[,2],
-                delta_3 = delta_sample[,3],
-                rho = rho_sample[,1]
+    out <- list(beta = beta_sample,
+                delta = delta_sample,
+                sigma_s_sq = sigma_s_sq_sample,
+                sigma_r_sq = sigma_r_sq_sample,
+                rho_agree = rho_agree_sample,
+                rho_con = rho_con_sample
     )
     
     return(out)
@@ -284,62 +289,67 @@ BICC <- function(data, niter, nchain, nburn){
   
   
   ######## Gibbs parameters names #########
-  parameternames <- c("beta", 
+  parameternames <- c("beta",
+                      "delta",
                       "sigma_s_sq", 
-                      "sigma_r_sq", 
-                      "delta_1",
-                      "delta_2",
-                      "delta_3",
-                      "rho")
-  
-  performance_metrics <- c()
-  
-  for(l in 1:length(parameternames)){
-    
-    
-    # create empty vector to store all samples of each parameter
-    assign(paste0('BICC_',parameternames[l],'_samples'), c())
-    
-    for(k in 1:nchain){
-      # store all samples of each parameter
-      assign(paste0('BICC_',parameternames[l],'_samples'), cbind(get(paste0('BICC_',parameternames[l],'_samples')),
-                                                                 get(paste0('BICC_chain',k))[[l]][start:end]))
+                      "sigma_r_sq",
+                      "rho_agree",
+                      "rho_con"
+                     )
+
+  par(mfrow = c(2,2))
+                            
+  for (param in parameternames) {
+    dimension <- dim(get(paste0('BICC_chain',1))[[param]])[2]
+    for(i in 1:dimension){
+      # Get min, max to plot samples
+      ylim_min <- min(get(paste0('BICC_chain',1))[[param]][start:end,i])
+      ylim_max <- max(get(paste0('BICC_chain',1))[[param]][start:end,i])
+      for(k in 1:nchain){
+        if(min(get(paste0('BICC_chain',k))[[param]][start:end,i])<ylim_min){
+          ylim_min <- min(get(paste0('BICC_chain',k))[[param]][start:end,i])
+        }
+        if(ylim_max<max(get(paste0('BICC_chain',k))[[param]][start:end,i])){
+          ylim_max <- max(get(paste0('BICC_chain',k))[[param]][start:end,i])
+        }
+      }
+      
+      # Plot samples for chain 1
+      plot(start:end, get(paste0('BICC_chain',1))[[param]][start:end,i], 
+           ylim = c(ylim_min, ylim_max), type = "l", ylab = "", 
+           main = paste('Gibbs', param, i, sep=" "), xlab = "Iteration")
+      
+      # Add chain 2-nchain to the same plot
+      if(nchain>1){
+        for(k in 2:nchain){
+          points(start:end, get(paste0('BICC_chain',k))[[param]][start:end,i], type="l", col=k)}}
     }
-    
-    # draw samples histogram
-    #hist(get(paste0('BICC_',parameternames[l],'_samples')), main = paste0('BICC_',parameternames[l],'_samples'))
-    
-    # store mean, SD, 95 lower bound, upper bound 
-    assign(paste0('BICC_',parameternames[l],'_samp'),c(mean(get(paste0('BICC_',parameternames[l],'_samples'))[,1]),
-                                                       sd(get(paste0('BICC_',parameternames[l],'_samples'))[,1]),
-                                                       unname(quantile(get(paste0('BICC_',parameternames[l],'_samples'))[,1], na.rm=TRUE, probs = c(0.025, 0.975)))))
-    
-    performance_metrics <- rbind(performance_metrics,get(paste0('BICC_',parameternames[l],'_samp')))
-    colnames(performance_metrics) <- c("Mean", "SD", "95% CI Lower bound", "Upper bound")
     
   }
   
-  rownames(performance_metrics) <- c(parameternames)
+    #######  Check convergence  ############################################################
   
+  sink(paste0(format(Sys.time(), "%m%d%Y"),'_BICC_',rubric,'_convergence_video_effect.txt'))
   
-  #######  Check convergence  ############################################################
   
   cat('-----------------------------------------------------------------','\n',sep = '')
   
-  for(l in 1:length(parameternames)){
-    
+  
+  for(param in parameternames){
+    dimension <- dim(get(paste0('BICC_chain',1))[[param]])[2]
+    for(i in 1:dimension){
     # create empty vector to store all samples of each parameter
-    assign(paste0('BICC_',parameternames[l],'_monitor'), c())
+    assign(paste0('BICC_',param,i,'_monitor'), c())
     
     for(k in 1:nchain){
       # store all samples of each parameter
-      assign(paste0('BICC_',parameternames[l],'_monitor'), cbind(get(paste0('BICC_',parameternames[l],'_monitor')),
-                                                                 get(paste0('BICC_chain',k))[[l]]))
+      assign(paste0('BICC_',param,i,'_monitor'), cbind(get(paste0('BICC_',param,i,'_monitor')),
+                                                                 get(paste0('BICC_chain',k))[[param]][,i]))
     }
-    cat('Check convergence of', parameternames[l], '\n','\n')
-    monitor(get(paste0('BICC_',parameternames[l],'_monitor')), warmup = nburn)
+    cat('Check convergence of', param,i, '\n','\n')
+    monitor(get(paste0('BICC_',param,i,'_monitor')), warmup = nburn)
     cat('-----------------------------------------------------------------------------','\n',sep = '')
-    
+    } 
   }
   
   
@@ -354,29 +364,46 @@ BICC <- function(data, niter, nchain, nburn){
   
   cat('\n','-----------------------------------------------------------------','\n',sep = '')
   
+  sink()
+  
+  # Create empty matrix to store performance metrics of all parameters
+  all_param <- c()
+  
+  # Beta
+  for (param in parameternames) {
+    dimension <- dim(get(paste0('BICC_chain',1))[[param]])[2]
+    for(i in 1:dimension){
+      # Create empty vector to store sample mean of each parameter
+      assign(paste(param,i,'samples', sep = '_'), c())
+      for(k in 1:nchain){
+        # Store all samples of each parameter
+        assign(paste(param,i,'samples', sep = '_'), 
+               c(get(paste(param,i,'samples', sep = '_')),
+                 get(paste0('BICC_chain',k))[[param]][start:end,i]))
+      }
+      
+      # Print Mean, Var, SD, 95% Credible interval
+      cat(param,i,'performance metrics', '\n', sep = ' ')
+      mean <- mean(get(paste(param,i,'samples', sep = '_')))
+      var <- var(get(paste(param,i,'samples', sep = '_')))
+      sd <- sd(get(paste(param,i,'samples', sep = '_')))
+      low_b <- unname(quantile(get(paste(param,i,'samples', sep = '_')), na.rm=TRUE, probs = c(0.025)))
+      up_b <- unname(quantile(get(paste(param,i,'samples', sep = '_')), na.rm=TRUE, probs = c(0.975)))
+      per_metrics <- cbind(mean,var,sd,low_b,up_b)
+      df <- data.frame(per_metrics)
+      colnames(df) <- c('Mean', 'Var', 'SD', '95% Lower', 'Upper bound')
+      rownames(df) <- paste(param,i,sep='_')
+      
+      # Put it in dataframe
+      all_param <- rbind(all_param,df)
+    }
+  }
+  
   # Report parameter estimates and 95% Credible interval
   cat('Gibbs Sampling Results', '\n',sep = '')
-  
-  print(performance_metrics)
+  print(all_param)
   
   cat('-----------------------------------------------------------------','\n',sep = '')
   
-  
-  
-  #################     plot the samples    #################################################
-  
-  
-  for(l in 1:length(parameternames)){
-    
-    # Get min, max to plot samples
-    ylim_min <- min(get(paste0('BICC_',parameternames[l],'_samples')))
-    ylim_max <- max(get(paste0('BICC_',parameternames[l],'_samples')))
-    
-    
-    # plot samples
-    plot(start:end, get(paste0('BICC_',parameternames[l],'_samples'))[,1],
-         ylim=c(ylim_min,ylim_max),type="l", ylab = "", 
-         main = paste('BICC', parameternames[l]), xlab = "Iteration")
-    if(nchain>1){for(k in 1:nchain){points(start:end, get(paste0('BICC_',parameternames[l],'_samples'))[,k], type="l", col=k)}}
-  }
+
 }
