@@ -29,7 +29,7 @@ BICC <- function(data, niter, nchain, nburn){
   video = as.numeric(data$video)
   rater = as.numeric(data$rater)
   score = as.numeric(data$score)
-  Xmat = as.matrix(Xmat)
+  predictor = as.matrix(data$predictor)
   
   # number of categories of the responses
   K <- length(unique(score))
